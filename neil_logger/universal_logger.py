@@ -1,0 +1,148 @@
+import logging
+import sys
+import traceback
+from datetime import datetime
+from pymongo import MongoClient
+import functools
+import atexit
+
+try:
+    from sentry_sdk import init as sentry_init, capture_exception, capture_message, set_tag
+    from sentry_sdk.integrations.logging import LoggingIntegration
+    SENTRY_AVAILABLE = True
+except ImportError:
+    SENTRY_AVAILABLE = False
+
+class UniversalLogger:
+    def __init__(self, name: str, run_id: str, mongo_uri: str, mongo_db: str, log_collection: str = "run_logs", error_collection: str = "error_logs", sentry_dsn: str = None):
+        self.name = name
+        self.run_id = run_id
+        self.mongo_client = MongoClient(mongo_uri)
+        self.db = self.mongo_client[mongo_db]
+        self.log_collection = self.db[log_collection]
+        self.error_collection = self.db[error_collection]
+        self.buffer = []
+
+        self.logger = logging.getLogger(name)
+        self.logger.setLevel(logging.DEBUG)
+
+        if not any(isinstance(h, logging.StreamHandler) for h in self.logger.handlers):
+            formatter = logging.Formatter(
+                "[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S"
+            )
+
+            stream_handler = logging.StreamHandler(sys.stdout)
+            stream_handler.setFormatter(formatter)
+            self.logger.addHandler(stream_handler)
+
+            # Internal buffer handler
+            class BufferHandler(logging.Handler):
+                def emit(inner_self, record):
+                    self.buffer.append({
+                        "timestamp": datetime.utcnow(),
+                        "level": record.levelname,
+                        "module": record.name,
+                        "function": record.funcName,
+                        "message": record.getMessage(),
+                        "run_id": self.run_id
+                    })
+
+            self.logger.addHandler(BufferHandler())
+
+        # Optional Sentry init
+        if sentry_dsn:
+            if not SENTRY_AVAILABLE:
+                raise ImportError("To enable Sentry logging, install the optional dependency with pip install universal-logger[sentry]")
+            sentry_logging = LoggingIntegration(
+                level=logging.INFO,
+                event_level=logging.ERROR
+            )
+            sentry_init(dsn=sentry_dsn, traces_sample_rate=0.0, integrations=[sentry_logging])
+            set_tag("run_id", self.run_id)
+            set_tag("logger", self.name)
+
+        atexit.register(self.flush)
+
+
+    def info(self, msg): self.logger.info(msg)
+    def warning(self, msg): self.logger.warning(msg)
+    def debug(self, msg): self.logger.debug(msg)
+    def critical(self, msg): self.logger.critical(msg)
+
+
+    def log(self, level, msg):
+        self.logger.log(level, msg)
+
+
+    def error(self, msg, exc: Exception = None):
+        self.logger.error(msg)
+        if exc:
+            capture_exception(exc)
+        else:
+            capture_message(msg, level="error")
+            
+
+    def flush(self):
+        if not self.buffer:
+            return
+
+        logs = self.buffer.copy()
+        self.buffer.clear()
+
+        self.log_collection.insert_one({
+            "run_id": self.run_id,
+            "logs": logs,
+            "timestamp": datetime.utcnow()
+        })
+
+        errors = [log for log in logs if log["level"] in {"ERROR", "CRITICAL"}]
+        if errors:
+            self.error_collection.insert_one({
+                "run_id": self.run_id,
+                "errors": errors,
+                "timestamp": datetime.utcnow()
+            })
+
+
+    def enable_global_exception_hook(self):
+        def handle_exception(exc_type, exc_value, exc_traceback):
+            if issubclass(exc_type, KeyboardInterrupt):
+                return
+            tb = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+            self.error_collection.insert_one({
+                "timestamp": datetime.utcnow(),
+                "run_id": self.run_id,
+                "error_type": str(exc_type),
+                "error": str(exc_value),
+                "traceback": tb,
+                "script": self.name
+            })
+            capture_exception(exc_value)
+
+        sys.excepthook = handle_exception
+
+
+    def capture_errors(self, suppress=False):
+        def decorator(func):
+            @functools.wraps(func)
+            def wrapper(*args, **kwargs):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    self.logger.error(f"[{func.__name__}] {e}")
+                    tb = traceback.format_exc()
+                    self.buffer.append({
+                        "timestamp": datetime.utcnow(),
+                        "level": "ERROR",
+                        "module": self.name,
+                        "function": func.__name__,
+                        "message": str(e),
+                        "traceback": tb,
+                        "run_id": self.run_id
+                    })
+                    capture_exception(e)
+                    if not suppress:
+                        raise
+            return wrapper
+        return decorator

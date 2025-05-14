@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "neil-logger"
+version = "0.1.0"
+description = "A universal logger that logs to MongoDB and optionally to Sentry"
+authors = [{ name = "Neil Tapiavala", email = "neil@tapiavala.com" }]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "pymongo>=4.0.0"
+]
+
+[project.optional-dependencies]
+sentry = ["sentry-sdk>=1.40.0"]
