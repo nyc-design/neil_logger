@@ -3,7 +3,7 @@ import logging
 import sys
 import traceback
 import inspect
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from pymongo import MongoClient
 import functools
@@ -37,7 +37,7 @@ class UniversalLogger:
                 stem = Path(caller_file).stem
             except Exception:
                 stem = self.name
-            run_id = f"{stem}_{datetime.utcnow():%Y%m%d_%H%M%S}"
+            run_id = f"{stem}_{datetime.now(timezone.utc):%Y%m%d_%H%M%S}"
         self.run_id = run_id
 
         # ── Set up MongoDB collections
@@ -65,7 +65,7 @@ class UniversalLogger:
             class BufferHandler(logging.Handler):
                 def emit(inner_self, record):
                     self.buffer.append({
-                        "timestamp": datetime.utcnow(),
+                        "timestamp": datetime.now(timezone.utc),
                         "level":     record.levelname,
                         "module":    record.name,
                         "function":  record.funcName,
@@ -113,7 +113,7 @@ class UniversalLogger:
         self.log_collection.insert_one({
             "run_id":   self.run_id,
             "logs":     logs,
-            "timestamp": datetime.utcnow()
+            "timestamp": datetime.now(timezone.utc)
         })
 
         # Extract only errors for the error collection
@@ -122,7 +122,7 @@ class UniversalLogger:
             self.error_collection.insert_one({
                 "run_id":   self.run_id,
                 "errors":   errors,
-                "timestamp": datetime.utcnow()
+                "timestamp": datetime.now(timezone.utc)
             })
 
     # ── Catch *uncaught* exceptions and log them
@@ -134,7 +134,7 @@ class UniversalLogger:
                 return
             tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
             self.error_collection.insert_one({
-                "timestamp":   datetime.utcnow(),
+                "timestamp":   datetime.now(timezone.utc),
                 "run_id":      self.run_id,
                 "error_type":  str(exc_type),
                 "error":       str(exc_value),
@@ -155,7 +155,7 @@ class UniversalLogger:
                     self.logger.error(f"[{func.__name__}] {e}")
                     tb = traceback.format_exc()
                     self.buffer.append({
-                        "timestamp": datetime.utcnow(),
+                        "timestamp": datetime.now(timezone.utc),
                         "level":     "ERROR",
                         "module":    self.name,
                         "function":  func.__name__,
